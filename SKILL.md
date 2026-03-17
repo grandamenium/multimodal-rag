@@ -89,40 +89,40 @@ Show the user the results of all three tests. If any fail, troubleshoot before p
 
 Ask the user three questions:
 
-**Question 1: "Where should the KB instructions live?"**
+**Question 1: "Where should the knowledge base instructions live?"**
 
 - **A) In my CLAUDE.md** (recommended for most users)
   - Instructions are always in your agent's context
-  - Agent will know about the KB every session
+  - Agent will know about the knowledge base every session
   - Uses some context window space (~500 tokens)
-  - Best for: frequent KB usage, business knowledge, project context
+  - Best for: frequent knowledge base usage, business knowledge, project context
 
 - **B) As a skill only** (what you have now)
-  - Agent only uses KB when you explicitly ask
+  - Agent only uses knowledge base when you explicitly ask
   - Zero context cost when not in use
   - Best for: occasional lookups, large reference libraries you rarely query
 
 - **C) Both** (light reference in CLAUDE.md + full instructions in skill)
-  - CLAUDE.md has a one-liner reminding the agent the KB exists
+  - CLAUDE.md has a one-liner reminding the agent the knowledge base exists
   - Detailed query/ingest instructions stay in this skill file
   - Best for: balanced usage without burning context
 
-**Question 2: "How autonomous should the agent be with the KB?"**
+**Question 2: "How autonomous should the agent be with the knowledge base?"**
 
 - **Manual** - Only query/ingest when I explicitly ask
   - "search the knowledge base for X"
-  - "add this file to the KB"
+  - "add this file to the knowledge base"
   - "what's in the knowledge base?"
 
 - **Suggested** - Query automatically for business/project questions, but don't ingest without asking
-  - Agent queries KB before answering questions about the project, business, or topics likely in the KB
+  - Agent queries knowledge base before answering questions about the project, business, or topics likely in the knowledge base
   - Agent suggests ingesting new important documents but waits for approval
-  - Agent ignores KB for general coding, conversation, or topics clearly outside the KB scope
+  - Agent ignores knowledge base for general coding, conversation, or topics clearly outside the knowledge base scope
 
 - **Proactive** - Query and ingest automatically
-  - Agent queries KB before answering any project/business question
+  - Agent queries knowledge base before answering any project/business question
   - Agent auto-ingests important new files (meeting notes, docs it creates, files user shares)
-  - Agent offers to ingest when it notices relevant content not in the KB
+  - Agent offers to ingest when it notices relevant content not in the knowledge base
 
 **Question 3: "What's the default collection for this project?"**
 
@@ -166,7 +166,7 @@ It contains [DESCRIPTION OF WHAT WAS INGESTED - e.g., "business docs, course vid
 - When you're unsure about project-specific details (pricing, architecture, processes)
 - When the user says "find", "where is", or references a file/image/video they can't locate
 - When the user asks you to recall or remember something
-- Do NOT query for general coding questions, conversation, or topics clearly outside the KB
+- Do NOT query for general coding questions, conversation, or topics clearly outside the knowledge base
 
 ### How to query
 \`\`\`bash
@@ -186,7 +186,7 @@ python3 ~/.claude/skills/multimodal-rag/scripts/mmrag.py query "description" --c
 
 ### Ingestion
 - Suggest ingesting new important documents but ask the user first
-- When user says "add this to the KB" or "remember this": ingest it
+- When user says "add this to the knowledge base" or "remember this": ingest it
 \`\`\`bash
 python3 ~/.claude/skills/multimodal-rag/scripts/mmrag.py ingest /path --collection COLLECTION_NAME
 \`\`\`
@@ -202,7 +202,7 @@ It contains [DESCRIPTION OF WHAT WAS INGESTED].
 ### When to query
 - Before answering any question about the project, business, architecture, processes, or team
 - When the user references something that might be documented (files, decisions, meeting notes)
-- When you're about to make assumptions about project-specific details - check the KB first
+- When you're about to make assumptions about project-specific details - check the knowledge base first
 - When the user asks to find, locate, or recall anything
 - Skip for: pure coding tasks on files in front of you, general conversation, external topics
 
@@ -224,8 +224,8 @@ Use --type image/video/text/pdf/audio to narrow by modality.
   \`\`\`bash
   python3 ~/.claude/skills/multimodal-rag/scripts/mmrag.py ingest /path/to/new/file --collection COLLECTION_NAME
   \`\`\`
-- When the user shares a file and says "remember this" or "add to KB", ingest immediately
-- When you notice important files that aren't in the KB, suggest ingesting them
+- When the user shares a file and says "remember this" or "add to knowledge base", ingest immediately
+- When you notice important files that aren't in the knowledge base, suggest ingesting them
 - Do NOT ingest temporary files, scratch work, or ephemeral content
 ```
 
@@ -243,7 +243,7 @@ Collection: "COLLECTION_NAME"
 
 Tell the user:
 1. What was installed
-2. How many files/chunks are in the KB
+2. How many files/chunks are in the knowledge base
 3. Which mode they chose (manual/suggested/proactive)
 4. Where the instructions were added (CLAUDE.md / skill only / both)
 5. How to add more content later: `mmrag.py ingest /path --collection NAME`
