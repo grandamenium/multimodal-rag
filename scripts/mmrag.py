@@ -55,6 +55,100 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.0  # return everything by default, let caller f
 DEFAULT_MAX_TOKENS = 0  # 0 = unlimited
 DEFAULT_PREVIEW_CHARS = 300
 
+# Pricing (per 1M tokens)
+EMBEDDING_PRICE_PER_M = 0.20
+FLASH_INPUT_PRICE_PER_M = 0.15
+FLASH_OUTPUT_PRICE_PER_M = 0.60
+
+USAGE_FILE = MMRAG_DIR / "usage.json"
+
+# ---------------------------------------------------------------------------
+# Usage Tracker
+# ---------------------------------------------------------------------------
+_tracker = None  # module-level, set by cmd_ingest/cmd_query
+
+
+class UsageTracker:
+    def __init__(self, operation="unknown"):
+        self.session = {
+            "embedding_tokens": 0,
+            "embedding_calls": 0,
+            "generation_input_tokens": 0,
+            "generation_output_tokens": 0,
+            "generation_calls": 0,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "operation": operation,
+        }
+
+    def track_embedding(self, content):
+        self.session["embedding_calls"] += 1
+        if isinstance(content, str):
+            self.session["embedding_tokens"] += int(len(content.split()) * 1.3)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    self.session["embedding_tokens"] += int(len(part.split()) * 1.3)
+                else:
+                    try:
+                        self.session["embedding_tokens"] += max(256, len(part.data) // 4)
+                    except Exception:
+                        self.session["embedding_tokens"] += 256
+
+    def track_generation(self, response):
+        self.session["generation_calls"] += 1
+        um = getattr(response, "usage_metadata", None)
+        if um:
+            self.session["generation_input_tokens"] += getattr(um, "prompt_token_count", 0) or 0
+            self.session["generation_output_tokens"] += getattr(um, "candidates_token_count", 0) or 0
+
+    def cost(self):
+        emb = (self.session["embedding_tokens"] / 1_000_000) * EMBEDDING_PRICE_PER_M
+        gen_in = (self.session["generation_input_tokens"] / 1_000_000) * FLASH_INPUT_PRICE_PER_M
+        gen_out = (self.session["generation_output_tokens"] / 1_000_000) * FLASH_OUTPUT_PRICE_PER_M
+        return {
+            "embedding": round(emb, 6),
+            "generation_input": round(gen_in, 6),
+            "generation_output": round(gen_out, 6),
+            "total": round(emb + gen_in + gen_out, 6),
+        }
+
+    def persist(self):
+        MMRAG_DIR.mkdir(parents=True, exist_ok=True)
+        self.session["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self.session["cost"] = self.cost()
+
+        data = {"cumulative": {}, "sessions": []}
+        if USAGE_FILE.exists():
+            try:
+                with open(USAGE_FILE) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, KeyError):
+                data = {"cumulative": {}, "sessions": []}
+
+        data.setdefault("sessions", []).append(self.session)
+
+        c = data.get("cumulative", {})
+        for key in ["embedding_tokens", "embedding_calls",
+                     "generation_input_tokens", "generation_output_tokens",
+                     "generation_calls"]:
+            c[key] = c.get(key, 0) + self.session[key]
+
+        c["total_cost"] = round(sum(
+            s.get("cost", {}).get("total", 0) for s in data["sessions"]
+        ), 6)
+        data["cumulative"] = c
+
+        with open(USAGE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def summary_line(self):
+        c = self.cost()
+        return (f"  Tokens: {self.session['embedding_tokens']:,} embedding, "
+                f"{self.session['generation_input_tokens']:,} gen-input, "
+                f"{self.session['generation_output_tokens']:,} gen-output | "
+                f"Cost: ${c['total']:.4f}")
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -93,6 +187,8 @@ def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
             task_type=task_type,
         ),
     )
+    if _tracker:
+        _tracker.track_embedding(content)
     return result.embeddings[0].values
 
 
@@ -157,6 +253,8 @@ def describe_media(client, config, file_path, media_type="video"):
             prompts.get(media_type, prompts["video"]),
         ],
     )
+    if _tracker:
+        _tracker.track_generation(response)
     return response.text, data, mime
 
 # ---------------------------------------------------------------------------
@@ -647,6 +745,8 @@ def ingest_pdf(client, config, collection, file_path):
             "Be thorough - this will be used for search and retrieval.",
         ],
     )
+    if _tracker:
+        _tracker.track_generation(response)
     text = response.text
 
     # Split by page markers if present, otherwise chunk normally
@@ -890,8 +990,9 @@ def ingest_file(client, config, collection, file_path):
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_ingest(args):
-    global args_force
+    global args_force, _tracker
     args_force = getattr(args, 'force', False)
+    _tracker = UsageTracker("ingest")
 
     config = load_config()
     client = get_genai_client(get_api_key(config))
@@ -905,41 +1006,45 @@ def cmd_ingest(args):
     skipped = 0
     errors = 0
 
-    for path_str in args.paths:
-        p = Path(path_str).resolve()
-        if p.is_dir():
-            files = sorted(f for f in p.rglob("*") if f.is_file() and not f.name.startswith("."))
-            print(f"Ingesting directory: {p} ({len(files)} files)")
-            for f in files:
-                print(f"  Processing: {f.relative_to(p)}")
+    try:
+        for path_str in args.paths:
+            p = Path(path_str).resolve()
+            if p.is_dir():
+                files = sorted(f for f in p.rglob("*") if f.is_file() and not f.name.startswith("."))
+                print(f"Ingesting directory: {p} ({len(files)} files)")
+                for f in files:
+                    print(f"  Processing: {f.relative_to(p)}")
+                    try:
+                        count = ingest_file(client, config, collection, f)
+                        total += count
+                        if count > 0:
+                            print(f"    Added {count} chunk(s)")
+                        elif count == 0:
+                            skipped += 1
+                    except Exception as e:
+                        print(f"    ERROR: {e}")
+                        errors += 1
+            elif p.is_file():
+                print(f"Ingesting: {p.name}")
                 try:
-                    count = ingest_file(client, config, collection, f)
+                    count = ingest_file(client, config, collection, p)
                     total += count
                     if count > 0:
-                        print(f"    Added {count} chunk(s)")
-                    elif count == 0:
-                        skipped += 1
+                        print(f"  Added {count} chunk(s)")
                 except Exception as e:
-                    print(f"    ERROR: {e}")
+                    print(f"  ERROR: {e}")
                     errors += 1
-        elif p.is_file():
-            print(f"Ingesting: {p.name}")
-            try:
-                count = ingest_file(client, config, collection, p)
-                total += count
-                if count > 0:
-                    print(f"  Added {count} chunk(s)")
-            except Exception as e:
-                print(f"  ERROR: {e}")
-                errors += 1
-        else:
-            print(f"NOT FOUND: {p}")
+            else:
+                print(f"NOT FOUND: {p}")
+    finally:
+        _tracker.persist()
 
     print(f"\nDone! Ingested {total} new chunk(s) into '{collection_name}'")
     if skipped:
         print(f"  Skipped: {skipped} (already existed or empty)")
     if errors:
         print(f"  Errors: {errors}")
+    print(_tracker.summary_line())
 
 
 def deduplicate_results(results, similarity_ratio=0.85):
@@ -968,6 +1073,9 @@ def deduplicate_results(results, similarity_ratio=0.85):
 
 
 def cmd_query(args):
+    global _tracker
+    _tracker = UsageTracker("query")
+
     config = load_config()
     client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
@@ -1126,6 +1234,69 @@ def cmd_query(args):
                 print(f"    Content: {content}")
         else:
             print("No results above similarity threshold.")
+
+    _tracker.persist()
+
+
+def cmd_usage(args):
+    """Show token usage and cost summary."""
+    if args.reset:
+        if USAGE_FILE.exists():
+            USAGE_FILE.unlink()
+        print("Usage data reset.")
+        return
+
+    if not USAGE_FILE.exists():
+        print("No usage data yet. Run an ingest or query first.")
+        return
+
+    with open(USAGE_FILE) as f:
+        data = json.load(f)
+
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+
+    c = data.get("cumulative", {})
+    sessions = data.get("sessions", [])
+
+    emb_cost = (c.get("embedding_tokens", 0) / 1_000_000) * EMBEDDING_PRICE_PER_M
+    gen_in_cost = (c.get("generation_input_tokens", 0) / 1_000_000) * FLASH_INPUT_PRICE_PER_M
+    gen_out_cost = (c.get("generation_output_tokens", 0) / 1_000_000) * FLASH_OUTPUT_PRICE_PER_M
+    total = emb_cost + gen_in_cost + gen_out_cost
+
+    print("mmrag Usage Summary")
+    print("=" * 40)
+    print(f"Total cost:    ${total:.4f}")
+    print(f"Total calls:   {c.get('embedding_calls', 0) + c.get('generation_calls', 0)} "
+          f"({c.get('embedding_calls', 0)} embedding, {c.get('generation_calls', 0)} generation)")
+    print()
+    print("Token breakdown:")
+    print(f"  Embedding:         {c.get('embedding_tokens', 0):>10,} tokens (est)  ${emb_cost:.4f}")
+    print(f"  Generation input:  {c.get('generation_input_tokens', 0):>10,} tokens        ${gen_in_cost:.4f}")
+    print(f"  Generation output: {c.get('generation_output_tokens', 0):>10,} tokens        ${gen_out_cost:.4f}")
+    print()
+    print(f"Sessions: {len(sessions)}")
+    if sessions:
+        last = sessions[-1]
+        print(f"  Last: {last.get('operation', '?')} @ {last.get('finished_at', '?')} "
+              f"(${last.get('cost', {}).get('total', 0):.4f})")
+
+    # Per-day breakdown from sessions
+    by_day = {}
+    for s in sessions:
+        day = s.get("started_at", "")[:10]
+        if day:
+            by_day.setdefault(day, {"cost": 0, "count": 0})
+            by_day[day]["cost"] += s.get("cost", {}).get("total", 0)
+            by_day[day]["count"] += 1
+
+    if by_day:
+        print()
+        print("Daily breakdown:")
+        for day in sorted(by_day.keys(), reverse=True)[:7]:
+            d = by_day[day]
+            print(f"  {day}:  ${d['cost']:.4f} ({d['count']} sessions)")
 
 
 def cmd_status(args):
@@ -1302,6 +1473,11 @@ def main():
     p_reset = sub.add_parser("reset", help="Reset the entire knowledge base")
     p_reset.add_argument("--confirm", action="store_true", help="Confirm reset")
 
+    # usage
+    p_usage = sub.add_parser("usage", help="Show token usage and cost summary")
+    p_usage.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    p_usage.add_argument("--reset", action="store_true", help="Reset usage data")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1316,6 +1492,7 @@ def main():
         "collections": cmd_collections,
         "delete": cmd_delete,
         "reset": cmd_reset,
+        "usage": cmd_usage,
     }
 
     commands[args.command](args)
