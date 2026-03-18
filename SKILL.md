@@ -248,6 +248,8 @@ Tell the user:
 4. Where the instructions were added (CLAUDE.md / skill only / both)
 5. How to add more content later: `mmrag.py ingest /path --collection NAME`
 6. How to check what's indexed: `mmrag.py status --collection NAME`
+7. Cost of the initial ingestion (from the summary line printed after ingest)
+8. How to check costs anytime: `mmrag.py usage` - all token usage and estimated costs are tracked automatically
 
 ---
 
@@ -279,6 +281,11 @@ $MMRAG list -c business                        # list ingested files
 $MMRAG collections                             # list all collections
 $MMRAG delete /path/to/file -c business        # remove a file
 $MMRAG reset --confirm                         # wipe everything
+
+# Usage & Cost
+$MMRAG usage                                   # human-readable cost summary
+$MMRAG usage --json                            # JSON for agent consumption
+$MMRAG usage --reset                           # clear usage data
 ```
 
 ## Reference: Supported Formats
@@ -372,4 +379,25 @@ Media files get described by Gemini Flash BEFORE embedding so queries return tex
   config.json     # settings + API key
   chromadb/       # vector database
   media/          # cached video/audio chunks
+  usage.json      # token usage and cost tracking
 ```
+
+## Reference: Usage & Cost Tracking
+
+Every ingest and query operation automatically tracks token usage and estimated cost. Data persists to `~/.mmrag/usage.json`.
+
+**Pricing tracked:**
+- Embedding (Gemini Embedding 2): $0.20 per 1M tokens (estimated from input text)
+- Generation input (Gemini Flash): $0.15 per 1M tokens (actual from API)
+- Generation output (Gemini Flash): $0.60 per 1M tokens (actual from API)
+
+**Check costs anytime:**
+```bash
+python3 ~/.claude/skills/multimodal-rag/scripts/mmrag.py usage         # human summary
+python3 ~/.claude/skills/multimodal-rag/scripts/mmrag.py usage --json  # for agent
+```
+
+**When to inform the user about costs:**
+- After large ingestion jobs (many files or videos), mention the cost from the summary line
+- If the user asks about costs or token usage, run `usage --json` and report
+- If cumulative costs are getting high, proactively mention it
